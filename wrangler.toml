@@ -5,7 +5,7 @@ pages_build_output_dir = "dist"
 [[d1_databases]]
 binding = "DB"
 database_name = "wstudio-db"
-database_id = "REPLACE_WITH_YOUR_D1_DATABASE_ID"
+database_id = "4855f4b4-2bbc-4a81-bf95-07c7c85983ee"
 
 [[r2_buckets]]
 binding = "UPLOADS"
