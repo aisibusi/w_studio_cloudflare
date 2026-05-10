@@ -1,0 +1,12 @@
+name = "w-studio"
+compatibility_date = "2026-05-09"
+pages_build_output_dir = "dist"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "wstudio-db"
+database_id = "REPLACE_WITH_YOUR_D1_DATABASE_ID"
+
+[[r2_buckets]]
+binding = "UPLOADS"
+bucket_name = "wstudio-uploads"
