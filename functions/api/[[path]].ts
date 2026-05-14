@@ -53,6 +53,7 @@ type AppSettings = {
   homeHeroImageUrl: string;
   collectionOrder: string[];
   collectionImageUrls: Record<string, string>;
+  productOrder: Record<string, string[]>;
 };
 
 const SESSION_MAX_AGE_SECONDS = 7 * 24 * 60 * 60;
@@ -72,6 +73,7 @@ const DEFAULT_SETTINGS: AppSettings = {
   homeHeroImageUrl: '/collections/hero-w-necklace.webp',
   collectionOrder: DEFAULT_COLLECTION_ORDER,
   collectionImageUrls: {},
+  productOrder: {},
 };
 
 class ApiError extends Error {
@@ -149,6 +151,21 @@ function normalizeCollectionImageUrls(value: unknown) {
   }, {});
 }
 
+
+function normalizeProductOrder(value: unknown) {
+  const submitted = value && typeof value === 'object' ? (value as Record<string, unknown>) : {};
+  return DEFAULT_COLLECTION_ORDER.reduce<Record<string, string[]>>((accumulator, collectionId) => {
+    const rawIds = Array.isArray(submitted[collectionId]) ? (submitted[collectionId] as unknown[]) : [];
+    const uniqueIds = rawIds
+      .map((id) => String(id || '').trim())
+      .filter((id, index, array) => Boolean(id) && array.indexOf(id) === index);
+    if (uniqueIds.length) {
+      accumulator[collectionId] = uniqueIds;
+    }
+    return accumulator;
+  }, {});
+}
+
 function normalizeSettings(value: Partial<AppSettings> = {}): AppSettings {
   const homeHeroImageUrl = String(value.homeHeroImageUrl || DEFAULT_SETTINGS.homeHeroImageUrl).trim();
   const wechatId = String(value.wechatId || DEFAULT_SETTINGS.wechatId).trim();
@@ -160,6 +177,7 @@ function normalizeSettings(value: Partial<AppSettings> = {}): AppSettings {
     homeHeroImageUrl: homeHeroImageUrl || DEFAULT_SETTINGS.homeHeroImageUrl,
     collectionOrder: normalizeCollectionOrder(value.collectionOrder),
     collectionImageUrls: normalizeCollectionImageUrls(value.collectionImageUrls),
+    productOrder: normalizeProductOrder(value.productOrder),
   };
 }
 
@@ -483,6 +501,7 @@ async function handleRequest(context: any) {
         ...body,
         collectionOrder: body.collectionOrder ?? currentSettings.collectionOrder,
         collectionImageUrls: body.collectionImageUrls ?? currentSettings.collectionImageUrls,
+        productOrder: body.productOrder ?? currentSettings.productOrder,
       }),
     );
   }

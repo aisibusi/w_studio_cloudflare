@@ -2,9 +2,9 @@ import { motion, type Variants } from 'motion/react';
 import { useEffect, useState } from 'react';
 import ProductCard from './ProductCard';
 import ProductDetailModal from './ProductDetailModal';
-import { getProducts } from '../lib/api';
+import { getProducts, getSiteSettings } from '../lib/api';
 import { DEFAULT_COLLECTION_ID, getProductCollectionId } from '../collections';
-import type { Product } from '../types';
+import type { AppSettings, Product } from '../types';
 
 interface ProductGridProps {
   collectionId?: string;
@@ -21,6 +21,22 @@ const productGridVariants: Variants = {
   },
 };
 
+
+function sortProductsForCollection(products: Product[], collectionId: string, settings: AppSettings | null) {
+  const productOrder = settings?.productOrder?.[collectionId] || [];
+  const orderIndex = new Map(productOrder.map((id, index) => [id, index]));
+  return [...products]
+    .filter((product) => getProductCollectionId(product) === collectionId)
+    .sort((left, right) => {
+      const leftIndex = orderIndex.has(left.id) ? orderIndex.get(left.id)! : Number.MAX_SAFE_INTEGER;
+      const rightIndex = orderIndex.has(right.id) ? orderIndex.get(right.id)! : Number.MAX_SAFE_INTEGER;
+      if (leftIndex !== rightIndex) {
+        return leftIndex - rightIndex;
+      }
+      return new Date(right.createdAt || 0).getTime() - new Date(left.createdAt || 0).getTime();
+    });
+}
+
 function getIsMultiColumnViewport() {
   if (typeof window === 'undefined') {
     return true;
@@ -35,6 +51,7 @@ export default function ProductGrid({
   onInquiryClick,
 }: ProductGridProps) {
   const [products, setProducts] = useState<Product[]>([]);
+  const [siteSettings, setSiteSettings] = useState<AppSettings | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [selectedProduct, setSelectedProduct] = useState<null | Product>(null);
@@ -44,10 +61,11 @@ export default function ProductGrid({
   useEffect(() => {
     let isMounted = true;
 
-    getProducts()
-      .then((items) => {
+    Promise.all([getProducts(), getSiteSettings()])
+      .then(([items, settings]) => {
         if (isMounted) {
           setProducts(items);
+          setSiteSettings(settings);
           setError(null);
         }
       })
@@ -113,7 +131,7 @@ export default function ProductGrid({
     );
   }
 
-  const collectionProducts = products.filter((product) => getProductCollectionId(product) === collectionId);
+  const collectionProducts = sortProductsForCollection(products, collectionId, siteSettings);
   return (
     <>
       <section

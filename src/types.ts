@@ -41,4 +41,5 @@ export interface AppSettings {
   homeHeroImageUrl: string;
   collectionOrder: string[];
   collectionImageUrls: Record<string, string>;
+  productOrder: Record<string, string[]>;
 }

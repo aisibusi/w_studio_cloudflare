@@ -46,11 +46,33 @@ type FormState = {
 const emptyForm: FormState = {
   name: '',
   price: '',
-  inquireForPricing: false,
+  inquireForPricing: true,
   imageUrl: '',
   description: '',
   collectionId: DEFAULT_COLLECTION_ID,
 };
+
+function formatDefaultProductName(sequence: number) {
+  return `produce_${String(sequence).padStart(3, '0')}`;
+}
+
+function getNextProductSequence(products: Product[]) {
+  return products.reduce((maxSequence, product) => {
+    const match = /^produce_(\d+)$/i.exec(product.name.trim());
+    if (!match) {
+      return maxSequence;
+    }
+    return Math.max(maxSequence, Number(match[1]));
+  }, 0) + 1;
+}
+
+function createDefaultForm(products: Product[], collectionId = DEFAULT_COLLECTION_ID): FormState {
+  return {
+    ...emptyForm,
+    name: formatDefaultProductName(getNextProductSequence(products)),
+    collectionId,
+  };
+}
 
 function toInput(form: FormState): ProductInput {
   const collection = getCollectionById(form.collectionId);
@@ -88,6 +110,7 @@ function defaultSiteSettings(): AppSettings {
     homeHeroImageUrl: '/collections/hero-w-necklace.webp',
     collectionOrder: COLLECTIONS.map((collection) => collection.id),
     collectionImageUrls: {},
+    productOrder: {},
   };
 }
 
@@ -110,6 +133,36 @@ function normalizeCollectionImageUrls(value?: Record<string, string>) {
   }, {});
 }
 
+
+function normalizeProductOrder(value?: Record<string, string[]>) {
+  const submitted = value && typeof value === 'object' ? value : {};
+  return COLLECTIONS.reduce<Record<string, string[]>>((accumulator, collection) => {
+    const rawIds = Array.isArray(submitted[collection.id]) ? submitted[collection.id] : [];
+    const uniqueIds = rawIds
+      .map((id) => String(id || '').trim())
+      .filter((id, index, array) => Boolean(id) && array.indexOf(id) === index);
+    if (uniqueIds.length) {
+      accumulator[collection.id] = uniqueIds;
+    }
+    return accumulator;
+  }, {});
+}
+
+function sortProductsForCollection(products: Product[], collectionId: string, productOrder?: Record<string, string[]>) {
+  const order = productOrder?.[collectionId] || [];
+  const orderIndex = new Map(order.map((id, index) => [id, index]));
+  return [...products]
+    .filter((product) => getProductCollectionId(product) === collectionId)
+    .sort((left, right) => {
+      const leftIndex = orderIndex.has(left.id) ? orderIndex.get(left.id)! : Number.MAX_SAFE_INTEGER;
+      const rightIndex = orderIndex.has(right.id) ? orderIndex.get(right.id)! : Number.MAX_SAFE_INTEGER;
+      if (leftIndex !== rightIndex) {
+        return leftIndex - rightIndex;
+      }
+      return new Date(right.createdAt || 0).getTime() - new Date(left.createdAt || 0).getTime();
+    });
+}
+
 function getCollectionCoverPreview(collectionId: string, settings: AppSettings) {
   return settings.collectionImageUrls?.[collectionId] || getCollectionById(collectionId).coverImageUrl || '';
 }
@@ -126,10 +179,14 @@ export default function AdminPage() {
   const [productsLoading, setProductsLoading] = useState(false);
   const [saving, setSaving] = useState(false);
   const [uploadingImage, setUploadingImage] = useState(false);
+  const [uploadingBatchImages, setUploadingBatchImages] = useState(false);
   const [uploadingHeroImage, setUploadingHeroImage] = useState(false);
   const [uploadingCollectionImageId, setUploadingCollectionImageId] = useState<string | null>(null);
   const [savingHomepage, setSavingHomepage] = useState(false);
   const [draggingCollectionId, setDraggingCollectionId] = useState<string | null>(null);
+  const [selectedProductCollectionId, setSelectedProductCollectionId] = useState(DEFAULT_COLLECTION_ID);
+  const [draggingProductId, setDraggingProductId] = useState<string | null>(null);
+  const [savingProductOrder, setSavingProductOrder] = useState(false);
   const [isEditorOpen, setIsEditorOpen] = useState(false);
   const [form, setForm] = useState<FormState>(emptyForm);
   const [editingId, setEditingId] = useState<string | null>(null);
@@ -142,6 +199,12 @@ export default function AdminPage() {
   const orderedCollections = useMemo(
     () => normalizeCollectionOrder(siteSettings.collectionOrder).map((id) => getCollectionById(id)),
     [siteSettings.collectionOrder],
+  );
+  const productOrder = useMemo(() => normalizeProductOrder(siteSettings.productOrder), [siteSettings.productOrder]);
+  const selectedProductCollection = useMemo(() => getCollectionById(selectedProductCollectionId), [selectedProductCollectionId]);
+  const selectedCollectionProducts = useMemo(
+    () => sortProductsForCollection(products, selectedProductCollectionId, productOrder),
+    [products, selectedProductCollectionId, productOrder],
   );
   const sortedInquiries = useMemo(
     () =>
@@ -167,6 +230,7 @@ export default function AdminPage() {
         ...nextSettings,
         collectionOrder: normalizeCollectionOrder(nextSettings.collectionOrder),
         collectionImageUrls: normalizeCollectionImageUrls(nextSettings.collectionImageUrls),
+        productOrder: normalizeProductOrder(nextSettings.productOrder),
       });
     } catch (error) {
       setMessage(error instanceof Error ? error.message : 'Unable to load dashboard.');
@@ -263,7 +327,7 @@ export default function AdminPage() {
   }
 
   function startNew() {
-    setForm(emptyForm);
+    setForm(createDefaultForm(products, selectedProductCollectionId));
     setEditingId(null);
     setMessage('');
     setIsEditorOpen(true);
@@ -313,6 +377,74 @@ export default function AdminPage() {
       setMessage(error instanceof Error ? error.message : 'Unable to upload image.');
     } finally {
       setUploadingImage(false);
+    }
+  }
+
+  async function handleImageFiles(fileList?: FileList | null) {
+    const files = Array.from(fileList || []).filter((file) => file.type.startsWith('image/'));
+    if (!files.length) {
+      return;
+    }
+
+    if (files.length === 1) {
+      await handleImageFile(files[0]);
+      return;
+    }
+
+    if (editingId) {
+      setMessage('Batch upload is only available when creating new entries. Edit mode can replace one product image at a time.');
+      return;
+    }
+
+    await handleBatchImageFiles(files);
+  }
+
+  async function handleBatchImageFiles(files: File[]) {
+    if (!files.length) {
+      return;
+    }
+
+    const collection = getCollectionById(form.collectionId);
+    const firstSequence = getNextProductSequence(products);
+    const createdImages: string[] = [];
+    const createdProducts: Product[] = [];
+    setUploadingBatchImages(true);
+    setMessage(`Uploading ${files.length} images to create ${files.length} new pieces in ${collection.name}...`);
+
+    try {
+      for (const [index, file] of files.entries()) {
+        const dataUrl = await readFileAsDataUrl(file);
+        const uploaded = await uploadImage(dataUrl);
+        createdImages.push(uploaded.imageUrl);
+
+        const productName = formatDefaultProductName(firstSequence + index);
+        const created = await createProduct({
+          name: productName,
+          price: null,
+          inquireForPricing: true,
+          imageUrl: uploaded.imageUrl,
+          description: form.description,
+          category: collection.name,
+          collectionId: collection.id,
+        });
+        createdProducts.push(created);
+      }
+
+      closeEditor();
+      await loadDashboard();
+      const firstName = formatDefaultProductName(firstSequence);
+      const lastName = formatDefaultProductName(firstSequence + files.length - 1);
+      setMessage(
+        files.length === 1
+          ? `Batch upload created ${firstName} with Inquire for pricing.`
+          : `Batch upload created ${createdProducts.length} pieces (${firstName}–${lastName}) with Inquire for pricing.`,
+      );
+    } catch (error) {
+      await Promise.allSettled(createdProducts.map((product) => deleteProduct(product.id)));
+      await Promise.allSettled(createdImages.map((imageUrl) => deleteUploadedImage(imageUrl)));
+      setMessage(error instanceof Error ? error.message : 'Unable to complete batch upload.');
+    } finally {
+      setUploadingBatchImages(false);
     }
   }
 
@@ -368,6 +500,77 @@ export default function AdminPage() {
     }
   }
 
+
+
+  async function saveProductOrder(nextProductOrder: Record<string, string[]>, messageText = 'Product display order updated.') {
+    setSavingProductOrder(true);
+    try {
+      const saved = await updateSiteSettings({ productOrder: nextProductOrder });
+      setSiteSettings((current) => ({
+        ...current,
+        ...saved,
+        collectionOrder: normalizeCollectionOrder(saved.collectionOrder),
+        collectionImageUrls: normalizeCollectionImageUrls(saved.collectionImageUrls),
+        productOrder: normalizeProductOrder(saved.productOrder),
+      }));
+      setMessage(messageText);
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : 'Unable to save product order.');
+      await loadDashboard();
+    } finally {
+      setSavingProductOrder(false);
+    }
+  }
+
+  function moveProduct(sourceId: string, targetId: string) {
+    if (sourceId === targetId || savingProductOrder) {
+      return;
+    }
+
+    const currentCollectionProducts = sortProductsForCollection(products, selectedProductCollectionId, productOrder);
+    const sourceIndex = currentCollectionProducts.findIndex((product) => product.id === sourceId);
+    const targetIndex = currentCollectionProducts.findIndex((product) => product.id === targetId);
+    if (sourceIndex === -1 || targetIndex === -1) {
+      return;
+    }
+
+    const reorderedCollectionProducts = [...currentCollectionProducts];
+    const [moved] = reorderedCollectionProducts.splice(sourceIndex, 1);
+    reorderedCollectionProducts.splice(targetIndex, 0, moved);
+
+    const reorderedIds = reorderedCollectionProducts.map((product) => product.id);
+    const selectedIds = new Set(reorderedIds);
+    const nextProducts = [
+      ...products.filter((product) => getProductCollectionId(product) !== selectedProductCollectionId),
+      ...reorderedCollectionProducts,
+      ...products.filter((product) => getProductCollectionId(product) === selectedProductCollectionId && !selectedIds.has(product.id)),
+    ];
+
+    const nextProductOrder = {
+      ...productOrder,
+      [selectedProductCollectionId]: reorderedIds,
+    };
+
+    setProducts(nextProducts);
+    setSiteSettings((current) => ({
+      ...current,
+      productOrder: nextProductOrder,
+    }));
+    void saveProductOrder(nextProductOrder, `${selectedProductCollection.name} display order updated.`);
+  }
+
+  function moveProductByStep(productId: string, direction: -1 | 1) {
+    if (savingProductOrder) {
+      return;
+    }
+    const collectionProducts = sortProductsForCollection(products, selectedProductCollectionId, productOrder);
+    const index = collectionProducts.findIndex((product) => product.id === productId);
+    const nextIndex = index + direction;
+    if (index === -1 || nextIndex < 0 || nextIndex >= collectionProducts.length) {
+      return;
+    }
+    moveProduct(productId, collectionProducts[nextIndex].id);
+  }
 
   async function handleHeroImageFile(file?: File) {
     if (!file) {
@@ -473,6 +676,7 @@ export default function AdminPage() {
         ...saved,
         collectionOrder: normalizeCollectionOrder(saved.collectionOrder),
         collectionImageUrls: normalizeCollectionImageUrls(saved.collectionImageUrls),
+        productOrder: normalizeProductOrder(saved.productOrder),
       });
       setMessage('Homepage updated. The main photo, category cover images, and collection order are now live.');
     } catch (error) {
@@ -633,23 +837,53 @@ export default function AdminPage() {
         {activeTab === 'products' ? (
           <section className="space-y-8">
             <div className="flex flex-col justify-between gap-5 md:flex-row md:items-center">
-              <h2 className="font-sans text-[11px] font-bold uppercase tracking-[0.3em] text-gray-400">
-                Archive Items ({archiveLabel})
-              </h2>
-              <button
-                type="button"
-                onClick={startNew}
-                className="flex w-fit items-center gap-3 bg-[#C5A059] px-6 py-3 font-sans text-[10px] font-bold uppercase tracking-widest text-white transition-all hover:bg-[#1A1A1A]"
-              >
-                <Plus size={16} />
-                New Entry
-              </button>
+              <div>
+                <h2 className="font-sans text-[11px] font-bold uppercase tracking-[0.3em] text-gray-400">
+                  Archive Items ({archiveLabel})
+                </h2>
+                <p className="mt-3 max-w-2xl text-sm leading-7 text-gray-500">
+                  Choose a collection/category, then drag pieces to control the image order shown on that public collection page.
+                </p>
+              </div>
+              <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
+                <select
+                  value={selectedProductCollectionId}
+                  onChange={(event) => setSelectedProductCollectionId(event.target.value)}
+                  className="min-w-[260px] border border-[#E5E2DE] bg-white px-5 py-3 font-sans text-[10px] font-bold uppercase tracking-[0.2em] text-[#1A1A1A]/70 outline-none transition-colors focus:border-[#C5A059]"
+                >
+                  {COLLECTIONS.map((collection) => (
+                    <option key={collection.id} value={collection.id}>
+                      {collection.name}
+                    </option>
+                  ))}
+                </select>
+                <button
+                  type="button"
+                  onClick={startNew}
+                  className="flex w-fit items-center gap-3 bg-[#C5A059] px-6 py-3 font-sans text-[10px] font-bold uppercase tracking-widest text-white transition-all hover:bg-[#1A1A1A]"
+                >
+                  <Plus size={16} />
+                  New Entry
+                </button>
+              </div>
+            </div>
+
+            <div className="border-l-2 border-[#C5A059] bg-white px-5 py-4 text-xs leading-6 text-gray-500 shadow-sm">
+              Showing <span className="font-semibold text-[#1A1A1A]">{selectedProductCollection.name}</span>. Drag rows or use ↑ / ↓ to change the storefront order at{' '}
+              <a href={`/collections/${selectedProductCollection.slug}`} target="_blank" rel="noreferrer" className="font-semibold text-[#C5A059] underline-offset-4 hover:underline">
+                /collections/{selectedProductCollection.slug}
+              </a>
+              . New uploaded pieces are added after the existing ordered pieces.
+              {savingProductOrder ? <span className="ml-2 font-semibold text-[#C5A059]">Saving order...</span> : null}
             </div>
 
             <div className="overflow-x-auto border border-[#E5E2DE] bg-white shadow-sm">
-              <table className="w-full min-w-[880px] border-collapse">
+              <table className="w-full min-w-[980px] border-collapse">
                 <thead>
                   <tr className="border-b border-[#E5E2DE] bg-[#FDFCFB]">
+                    <th className="px-6 py-5 text-left font-sans text-[9px] font-bold uppercase tracking-widest text-[#1A1A1A]/40">
+                      Order
+                    </th>
                     <th className="px-8 py-5 text-left font-sans text-[9px] font-bold uppercase tracking-widest text-[#1A1A1A]/40">
                       Visual
                     </th>
@@ -671,14 +905,55 @@ export default function AdminPage() {
                   {productsLoading ? (
                     [1, 2, 3].map((item) => (
                       <tr key={item}>
-                        <td colSpan={5} className="px-8 py-8">
+                        <td colSpan={6} className="px-8 py-8">
                           <div className="h-16 animate-pulse bg-[#F3F0EA]" />
                         </td>
                       </tr>
                     ))
-                  ) : products.length ? (
-                    products.map((product) => (
-                      <tr key={product.id} className="group transition-colors hover:bg-[#FDFCFB]">
+                  ) : selectedCollectionProducts.length ? (
+                    selectedCollectionProducts.map((product, index) => (
+                      <tr
+                        key={product.id}
+                        draggable
+                        onDragStart={() => setDraggingProductId(product.id)}
+                        onDragOver={(event) => event.preventDefault()}
+                        onDrop={() => {
+                          if (draggingProductId) {
+                            moveProduct(draggingProductId, product.id);
+                          }
+                          setDraggingProductId(null);
+                        }}
+                        onDragEnd={() => setDraggingProductId(null)}
+                        className={`group transition-colors hover:bg-[#FDFCFB] ${draggingProductId === product.id ? 'bg-[#FDFCFB] opacity-60' : ''}`}
+                      >
+                        <td className="px-6 py-6">
+                          <div className="flex items-center gap-3">
+                            <GripVertical className="cursor-grab text-[#1A1A1A]/25" size={18} />
+                            <span className="flex h-9 w-9 items-center justify-center border border-[#E5E2DE] bg-[#FDFCFB] font-accent text-xs text-[#C5A059]">
+                              {index + 1}
+                            </span>
+                            <div className="flex flex-col gap-1">
+                              <button
+                                type="button"
+                                onClick={() => moveProductByStep(product.id, -1)}
+                                disabled={index === 0 || savingProductOrder}
+                                className="h-6 w-7 border border-[#E5E2DE] text-[10px] text-[#1A1A1A]/45 transition-colors hover:border-[#C5A059] hover:text-[#C5A059] disabled:opacity-25"
+                                title="Move up"
+                              >
+                                ↑
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => moveProductByStep(product.id, 1)}
+                                disabled={index === selectedCollectionProducts.length - 1 || savingProductOrder}
+                                className="h-6 w-7 border border-[#E5E2DE] text-[10px] text-[#1A1A1A]/45 transition-colors hover:border-[#C5A059] hover:text-[#C5A059] disabled:opacity-25"
+                                title="Move down"
+                              >
+                                ↓
+                              </button>
+                            </div>
+                          </div>
+                        </td>
                         <td className="px-8 py-6">
                           <div className="h-20 w-16 overflow-hidden border border-[#E5E2DE] bg-zinc-100 shadow-sm">
                             <img src={product.imageUrl} alt="" className="h-full w-full object-cover" />
@@ -722,8 +997,8 @@ export default function AdminPage() {
                     ))
                   ) : (
                     <tr>
-                      <td colSpan={5} className="px-8 py-20 text-center">
-                        <p className="font-display text-2xl italic text-[#1A1A1A]/35">Archive is empty</p>
+                      <td colSpan={6} className="px-8 py-20 text-center">
+                        <p className="font-display text-2xl italic text-[#1A1A1A]/35">This collection is empty</p>
                       </td>
                     </tr>
                   )}
@@ -1100,12 +1375,13 @@ export default function AdminPage() {
                     >
                       <label className="flex w-full cursor-pointer items-center justify-center gap-3 bg-white py-4 font-sans text-[10px] font-bold uppercase tracking-widest text-[#1A1A1A] shadow-xl transition-all hover:bg-[#C5A059] hover:text-white">
                         <Upload size={16} />
-                        {uploadingImage ? 'Processing...' : 'Upload Master Asset'}
+                        {uploadingImage || uploadingBatchImages ? 'Processing...' : editingId ? 'Upload Master Asset' : 'Upload One or Multiple Assets'}
                         <input
                           type="file"
                           accept="image/*"
                           className="sr-only"
-                          onChange={(event) => handleImageFile(event.target.files?.[0])}
+                          multiple={!editingId}
+                          onChange={(event) => void handleImageFiles(event.target.files)}
                         />
                       </label>
                     </div>
@@ -1138,7 +1414,7 @@ export default function AdminPage() {
 
                   <div className="border-l-2 border-[#C5A059] bg-[#FDFCFB] p-6">
                     <p className="font-sans text-[9px] uppercase leading-relaxed tracking-[0.2em] text-gray-500">
-                      Upload one main product visual for this piece. It will be saved to the Railway volume and displayed in the {selectedCollectionTheme}. Recommended: square or vertical image, clean background, clear jewelry details.
+                      Upload one main product visual, or select multiple images while creating a new entry to batch-create pieces. Each batch-created piece uses the next produce_### name and defaults to Inquire for pricing. Images are saved to Cloudflare R2 and displayed in the {selectedCollectionTheme}. Recommended: square or vertical image, clean background, clear jewelry details.
                     </p>
                   </div>
                 </div>
@@ -1155,7 +1431,7 @@ export default function AdminPage() {
               </button>
               <button
                 type="submit"
-                disabled={saving || uploadingImage}
+                disabled={saving || uploadingImage || uploadingBatchImages}
                 className="flex items-center justify-center gap-3 bg-[#1A1A1A] px-10 py-4 font-sans text-[10px] font-bold uppercase tracking-widest text-white shadow-lg transition-all hover:bg-[#C5A059] disabled:opacity-60"
               >
                 <Save size={14} />
